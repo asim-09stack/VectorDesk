@@ -1,0 +1,114 @@
+// VectorDesk Prisma schema
+// Datasource: PostgreSQL · Client: prisma-client-js
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Application roles. Admins manage documents; users chat.
+enum Role {
+  ADMIN
+  USER
+}
+
+/// Lifecycle of a document through the ingestion/embedding pipeline.
+enum DocumentStatus {
+  PENDING // uploaded, not yet processed
+  PROCESSING // text extraction / chunking / embedding in progress
+  INDEXED // chunks embedded and stored in the vector DB
+  FAILED // processing failed (see error message)
+}
+
+/// Author of a chat message.
+enum MessageRole {
+  user
+  assistant
+  system
+}
+
+model User {
+  id        String   @id @default(uuid())
+  name      String
+  email     String   @unique
+  password  String // bcrypt hash — never the plaintext
+  role      Role     @default(USER)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  documents Document[] @relation("UploadedDocuments")
+  chats     Chat[]
+
+  @@map("users")
+}
+
+model Document {
+  id         String         @id @default(uuid())
+  filename   String // stored file name on disk
+  title      String // human-friendly display title
+  mimeType   String
+  sizeBytes  Int
+  status     DocumentStatus @default(PENDING)
+  chunkCount Int            @default(0)
+  error      String? // populated when status = FAILED
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+
+  uploadedById String
+  uploadedBy   User   @relation("UploadedDocuments", fields: [uploadedById], references: [id], onDelete: Cascade)
+
+  chunks Chunk[]
+
+  @@index([uploadedById])
+  @@map("documents")
+}
+
+model Chunk {
+  id         String   @id @default(uuid())
+  documentId String
+  text       String // the chunk's text content
+  chunkIndex Int // ordinal position within the source document
+  tokenCount Int      @default(0)
+  // Vector id used to correlate this chunk with its embedding in ChromaDB.
+  vectorId   String   @unique
+  createdAt  DateTime @default(now())
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, chunkIndex])
+  @@index([documentId])
+  @@map("chunks")
+}
+
+model Chat {
+  id        String   @id @default(uuid())
+  userId    String
+  title     String   @default("New Chat")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages Message[]
+
+  @@index([userId])
+  @@map("chats")
+}
+
+model Message {
+  id      String      @id @default(uuid())
+  chatId  String
+  role    MessageRole
+  content String
+  // Citations (retrieved chunks) attached to assistant answers, stored as JSON.
+  citations Json?
+  createdAt DateTime  @default(now())
+
+  chat Chat @relation(fields: [chatId], references: [id], onDelete: Cascade)
+
+  @@index([chatId])
+  @@map("messages")
+}

@@ -1,0 +1,104 @@
+# VectorDesk local infrastructure.
+#
+# Brings up the two stateful backing services the app needs:
+#   - PostgreSQL   (relational metadata)
+#   - ChromaDB     (vector store for embeddings)
+#
+# Ollama runs natively on the host (not containerized here) so it can use your
+# machine's GPU/Metal acceleration. Ensure it is running and the models are
+# pulled:  `ollama pull qwen2.5:7b`  and  `ollama pull nomic-embed-text`.
+#
+# Usage:
+#   docker compose up -d                     # infra only (Postgres + Chroma)
+#   docker compose --profile app up -d --build  # full stack (adds API + web)
+#   docker compose down                      # stop
+#   docker compose down -v                   # stop and wipe data volumes
+#
+# When running the full stack, the backend reaches Ollama on the host via
+# `host.docker.internal` (configured in the backend service environment).
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: vectordesk-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: vectordesk
+      POSTGRES_PASSWORD: vectordesk
+      POSTGRES_DB: vectordesk
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U vectordesk -d vectordesk']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  chroma:
+    image: chromadb/chroma:0.5.20
+    container_name: vectordesk-chroma
+    restart: unless-stopped
+    ports:
+      - '8000:8000'
+    volumes:
+      - chroma-data:/chroma/chroma
+    environment:
+      IS_PERSISTENT: 'TRUE'
+      ANONYMIZED_TELEMETRY: 'FALSE'
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:8000/api/v1/heartbeat']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ── Application services (opt-in via the "app" profile) ──────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: vectordesk-backend
+    profiles: ['app']
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      chroma:
+        condition: service_started
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      CORS_ORIGIN: http://localhost:8080
+      DATABASE_URL: postgresql://vectordesk:vectordesk@postgres:5432/vectordesk?schema=public
+      JWT_SECRET: change-me-to-a-long-random-secret-string
+      JWT_EXPIRES_IN: 7d
+      # Reach Ollama running natively on the host machine.
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      OLLAMA_CHAT_MODEL: qwen2.5:7b
+      OLLAMA_EMBEDDING_MODEL: nomic-embed-text
+      CHROMA_URL: http://chroma:8000
+      CHROMA_COLLECTION: vectordesk_documents
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    volumes:
+      - uploads-data:/app/uploads
+    ports:
+      - '4000:4000'
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: vectordesk-frontend
+    profiles: ['app']
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - '8080:80'
+
+volumes:
+  postgres-data:
+  chroma-data:
+  uploads-data:
