@@ -5,13 +5,23 @@ import pdfParse from 'pdf-parse/lib/pdf-parse.js';
 import { BadRequestError } from '@/utils/errors';
 
 /**
- * Normalize extracted text: collapse excessive whitespace and blank lines
- * while preserving paragraph boundaries. Cleaner text → cleaner chunks →
- * better embeddings.
+ * Normalize extracted text: strip characters that cannot be stored/used, then
+ * collapse excessive whitespace and blank lines while preserving paragraph
+ * boundaries. Cleaner text → cleaner chunks → better embeddings.
+ *
+ * Notably, PDF extraction frequently emits NUL bytes (0x00) and other
+ * non-printable control characters. PostgreSQL's `text` type rejects NUL
+ * bytes ("invalid byte sequence for encoding UTF8: 0x00"), so we remove them
+ * (and other control chars) up front, keeping only tab and newline.
  */
 const normalizeText = (raw: string): string =>
   raw
     .replace(/\r\n/g, '\n')
+    // Remove NUL and C0/C1 control characters except tab (\t) and newline (\n).
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    // Drop the Unicode replacement char that often appears for undecodable glyphs.
+    .replace(/\uFFFD/g, '')
     .replace(/[ \t]+/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
